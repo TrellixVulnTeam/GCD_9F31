@@ -9,17 +9,21 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-# import torch
-# import torch.nn as nn
-# import torch.distributed as dist
-# import torch.backends.cudnn as cudnn
-# import torch.nn.functional as F
-# from torchvision import datasets, transforms
-# from torchvision import models as torchvision_models
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
+from torchvision import datasets, transforms
+from torchvision import models as torchvision_models
 
 import utils
 import vision_transformer as vits
 from vision_transformer import DINOHead
+
+torchvision_archs = sorted(name for name in torchvision_models.__dict__
+    if name.islower() and not name.startswith("__")
+    and callable(torchvision_models.__dict__[name]))
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DINO', add_help=False)
@@ -108,6 +112,7 @@ def train_gcd():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
     args = parser.parse_args()
+    print(args)
     
     # Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     # train_dino(args)

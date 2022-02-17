@@ -26,9 +26,9 @@ import subprocess
 from collections import defaultdict, deque
 
 import numpy as np
-# import torch
-# from torch import nn
-# import torch.distributed as dist
+import torch
+from torch import nn
+import torch.distributed as dist
 from PIL import ImageFilter, ImageOps
 
 
@@ -549,83 +549,83 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     return _no_grad_trunc_normal_(tensor, mean, std, a, b)
 
 
-# class LARS(torch.optim.Optimizer):
-#     """
-#     Almost copy-paste from https://github.com/facebookresearch/barlowtwins/blob/main/main.py
-#     """
-#     def __init__(self, params, lr=0, weight_decay=0, momentum=0.9, eta=0.001,
-#                  weight_decay_filter=None, lars_adaptation_filter=None):
-#         defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum,
-#                         eta=eta, weight_decay_filter=weight_decay_filter,
-#                         lars_adaptation_filter=lars_adaptation_filter)
-#         super().__init__(params, defaults)
+class LARS(torch.optim.Optimizer):
+    """
+    Almost copy-paste from https://github.com/facebookresearch/barlowtwins/blob/main/main.py
+    """
+    def __init__(self, params, lr=0, weight_decay=0, momentum=0.9, eta=0.001,
+                 weight_decay_filter=None, lars_adaptation_filter=None):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum,
+                        eta=eta, weight_decay_filter=weight_decay_filter,
+                        lars_adaptation_filter=lars_adaptation_filter)
+        super().__init__(params, defaults)
 
-#     @torch.no_grad()
-#     def step(self):
-#         for g in self.param_groups:
-#             for p in g['params']:
-#                 dp = p.grad
+    @torch.no_grad()
+    def step(self):
+        for g in self.param_groups:
+            for p in g['params']:
+                dp = p.grad
 
-#                 if dp is None:
-#                     continue
+                if dp is None:
+                    continue
 
-#                 if p.ndim != 1:
-#                     dp = dp.add(p, alpha=g['weight_decay'])
+                if p.ndim != 1:
+                    dp = dp.add(p, alpha=g['weight_decay'])
 
-#                 if p.ndim != 1:
-#                     param_norm = torch.norm(p)
-#                     update_norm = torch.norm(dp)
-#                     one = torch.ones_like(param_norm)
-#                     q = torch.where(param_norm > 0.,
-#                                     torch.where(update_norm > 0,
-#                                                 (g['eta'] * param_norm / update_norm), one), one)
-#                     dp = dp.mul(q)
+                if p.ndim != 1:
+                    param_norm = torch.norm(p)
+                    update_norm = torch.norm(dp)
+                    one = torch.ones_like(param_norm)
+                    q = torch.where(param_norm > 0.,
+                                    torch.where(update_norm > 0,
+                                                (g['eta'] * param_norm / update_norm), one), one)
+                    dp = dp.mul(q)
 
-#                 param_state = self.state[p]
-#                 if 'mu' not in param_state:
-#                     param_state['mu'] = torch.zeros_like(p)
-#                 mu = param_state['mu']
-#                 mu.mul_(g['momentum']).add_(dp)
+                param_state = self.state[p]
+                if 'mu' not in param_state:
+                    param_state['mu'] = torch.zeros_like(p)
+                mu = param_state['mu']
+                mu.mul_(g['momentum']).add_(dp)
 
-#                 p.add_(mu, alpha=-g['lr'])
+                p.add_(mu, alpha=-g['lr'])
 
 
-# class MultiCropWrapper(nn.Module):
-#     """
-#     Perform forward pass separately on each resolution input.
-#     The inputs corresponding to a single resolution are clubbed and single
-#     forward is run on the same resolution inputs. Hence we do several
-#     forward passes = number of different resolutions used. We then
-#     concatenate all the output features and run the head forward on these
-#     concatenated features.
-#     """
-#     def __init__(self, backbone, head):
-#         super(MultiCropWrapper, self).__init__()
-#         # disable layers dedicated to ImageNet labels classification
-#         backbone.fc, backbone.head = nn.Identity(), nn.Identity()
-#         self.backbone = backbone
-#         self.head = head
+class MultiCropWrapper(nn.Module):
+    """
+    Perform forward pass separately on each resolution input.
+    The inputs corresponding to a single resolution are clubbed and single
+    forward is run on the same resolution inputs. Hence we do several
+    forward passes = number of different resolutions used. We then
+    concatenate all the output features and run the head forward on these
+    concatenated features.
+    """
+    def __init__(self, backbone, head):
+        super(MultiCropWrapper, self).__init__()
+        # disable layers dedicated to ImageNet labels classification
+        backbone.fc, backbone.head = nn.Identity(), nn.Identity()
+        self.backbone = backbone
+        self.head = head
 
-#     def forward(self, x):
-#         # convert to list
-#         if not isinstance(x, list):
-#             x = [x]
-#         idx_crops = torch.cumsum(torch.unique_consecutive(
-#             torch.tensor([inp.shape[-1] for inp in x]),
-#             return_counts=True,
-#         )[1], 0)
-#         start_idx, output = 0, torch.empty(0).to(x[0].device)
-#         for end_idx in idx_crops:
-#             _out = self.backbone(torch.cat(x[start_idx: end_idx]))
-#             # The output is a tuple with XCiT model. See:
-#             # https://github.com/facebookresearch/xcit/blob/master/xcit.py#L404-L405
-#             if isinstance(_out, tuple):
-#                 _out = _out[0]
-#             # accumulate outputs
-#             output = torch.cat((output, _out))
-#             start_idx = end_idx
-#         # Run the head forward on the concatenated features.
-#         return self.head(output)
+    def forward(self, x):
+        # convert to list
+        if not isinstance(x, list):
+            x = [x]
+        idx_crops = torch.cumsum(torch.unique_consecutive(
+            torch.tensor([inp.shape[-1] for inp in x]),
+            return_counts=True,
+        )[1], 0)
+        start_idx, output = 0, torch.empty(0).to(x[0].device)
+        for end_idx in idx_crops:
+            _out = self.backbone(torch.cat(x[start_idx: end_idx]))
+            # The output is a tuple with XCiT model. See:
+            # https://github.com/facebookresearch/xcit/blob/master/xcit.py#L404-L405
+            if isinstance(_out, tuple):
+                _out = _out[0]
+            # accumulate outputs
+            output = torch.cat((output, _out))
+            start_idx = end_idx
+        # Run the head forward on the concatenated features.
+        return self.head(output)
 
 
 def get_params_groups(model):
