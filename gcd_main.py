@@ -108,5 +108,6 @@ def train_gcd():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
     args = parser.parse_args()
+    
     # Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     # train_dino(args)
