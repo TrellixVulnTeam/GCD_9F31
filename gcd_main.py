@@ -66,6 +66,9 @@ def parse_args():
     parser.add_argument("--momentum", default=0.9, type=float, help="Momentum for SGD")
 
     parser.add_argument("--num_workers", default=4, type=int, help="number of workers for Dataloader")
+    parser.add_argument('--num_unlabeled_classes', default=5, type=int)
+    parser.add_argument('--num_labeled_classes', default=5, type=int)
+    parser.add_argument('--dataset_root', type=str, default='./data/datasets/CIFAR/')
 
     args = parser.parse_args()
 
@@ -280,6 +283,15 @@ def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args.device = device
+
+    if args.dataset == "cifar100":
+        labeled_train_loader = CIFAR100Loader(root=args.dataset_root, batch_size=args.batch_size, split='train', aug='once', shuffle=True, target_list = range(args.num_labeled_classes))
+        labeled_eval_loader = CIFAR100Loader(root=args.dataset_root, batch_size=args.batch_size, split='test', aug=None, shuffle=False, target_list = range(args.num_labeled_classes))
+    else:
+        labeled_train_loader = CIFAR10Loader(root=args.dataset_root, batch_size=args.batch_size, split='train', aug='once', shuffle=True, target_list = range(args.num_labeled_classes))
+        labeled_eval_loader = CIFAR10Loader(root=args.dataset_root, batch_size=args.batch_size, split='test', aug=None, shuffle=False, target_list = range(args.num_labeled_classes))
+
+
 
     # if args.dataset == "cifar10":
     #     mean = (0.4914, 0.4822, 0.4465)
