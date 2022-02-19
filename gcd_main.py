@@ -12,8 +12,7 @@ from torchvision import datasets, transforms
 
 from utils import progress_bar
 from loss.spc import SupervisedContrastiveLoss
-from data_augmentation.auto_augment import AutoAugment
-from data_augmentation.duplicate_sample_transform import DuplicateSampleTransform
+from data.cifarloader import CIFAR10Loader, CIFAR100Loader
 
 
 def parse_args():
@@ -73,211 +72,208 @@ def parse_args():
     return args
 
 
-def adjust_learning_rate(optimizer, epoch, mode, args):
-    """
-    :param optimizer: torch.optim
-    :param epoch: int
-    :param mode: str
-    :param args: argparse.Namespace
-    :return: None
-    """
-    if mode == "contrastive":
-        lr = args.lr_contrastive
-        n_epochs = args.n_epochs_contrastive
-    elif mode == "cross_entropy":
-        lr = args.lr_cross_entropy
-        n_epochs = args.n_epochs_cross_entropy
-    else:
-        raise ValueError("Mode %s unknown" % mode)
+# def adjust_learning_rate(optimizer, epoch, mode, args):
+#     """
+#     :param optimizer: torch.optim
+#     :param epoch: int
+#     :param mode: str
+#     :param args: argparse.Namespace
+#     :return: None
+#     """
+#     if mode == "contrastive":
+#         lr = args.lr_contrastive
+#         n_epochs = args.n_epochs_contrastive
+#     elif mode == "cross_entropy":
+#         lr = args.lr_cross_entropy
+#         n_epochs = args.n_epochs_cross_entropy
+#     else:
+#         raise ValueError("Mode %s unknown" % mode)
 
-    if args.cosine:
-        eta_min = lr * (args.lr_decay_rate ** 3)
-        lr = eta_min + (lr - eta_min) * (1 + math.cos(math.pi * epoch / n_epochs)) / 2
-    else:
-        n_steps_passed = np.sum(epoch > np.asarray(args.lr_decay_epochs))
-        if n_steps_passed > 0:
-            lr = lr * (args.lr_decay_rate ** n_steps_passed)
+#     if args.cosine:
+#         eta_min = lr * (args.lr_decay_rate ** 3)
+#         lr = eta_min + (lr - eta_min) * (1 + math.cos(math.pi * epoch / n_epochs)) / 2
+#     else:
+#         n_steps_passed = np.sum(epoch > np.asarray(args.lr_decay_epochs))
+#         if n_steps_passed > 0:
+#             lr = lr * (args.lr_decay_rate ** n_steps_passed)
 
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
+#     for param_group in optimizer.param_groups:
+#         param_group["lr"] = lr
 
+# def train_contrastive(model, train_loader, criterion, optimizer, writer, args):
+#     """
+#     :param model: torch.nn.Module Model
+#     :param train_loader: torch.utils.data.DataLoader
+#     :param criterion: torch.nn.Module Loss
+#     :param optimizer: torch.optim
+#     :param writer: torch.utils.tensorboard.SummaryWriter
+#     :param args: argparse.Namespace
+#     :return: None
+#     """
+#     model.train()
+#     best_loss = float("inf")
 
-def train_contrastive(model, train_loader, criterion, optimizer, writer, args):
-    """
-    :param model: torch.nn.Module Model
-    :param train_loader: torch.utils.data.DataLoader
-    :param criterion: torch.nn.Module Loss
-    :param optimizer: torch.optim
-    :param writer: torch.utils.tensorboard.SummaryWriter
-    :param args: argparse.Namespace
-    :return: None
-    """
-    model.train()
-    best_loss = float("inf")
+#     for epoch in range(args.n_epochs_contrastive):
+#         print("Epoch [%d/%d]" % (epoch + 1, args.n_epochs_contrastive))
 
-    for epoch in range(args.n_epochs_contrastive):
-        print("Epoch [%d/%d]" % (epoch + 1, args.n_epochs_contrastive))
+#         train_loss = 0
+#         for batch_idx, (inputs, targets) in enumerate(train_loader):
+#             inputs = torch.cat(inputs)
+#             targets = targets.repeat(2)
 
-        train_loss = 0
-        for batch_idx, (inputs, targets) in enumerate(train_loader):
-            inputs = torch.cat(inputs)
-            targets = targets.repeat(2)
+#             inputs, targets = inputs.to(args.device), targets.to(args.device)
+#             optimizer.zero_grad()
 
-            inputs, targets = inputs.to(args.device), targets.to(args.device)
-            optimizer.zero_grad()
+#             projections = model.forward_constrative(inputs)
+#             loss = criterion(projections, targets)
+#             loss.backward()
+#             optimizer.step()
 
-            projections = model.forward_constrative(inputs)
-            loss = criterion(projections, targets)
-            loss.backward()
-            optimizer.step()
+#             train_loss += loss.item()
+#             writer.add_scalar(
+#                 "Loss train | Supervised Contrastive",
+#                 loss.item(),
+#                 epoch * len(train_loader) + batch_idx,
+#             )
+#             progress_bar(
+#                 batch_idx,
+#                 len(train_loader),
+#                 "Loss: %.3f " % (train_loss / (batch_idx + 1)),
+#             )
 
-            train_loss += loss.item()
-            writer.add_scalar(
-                "Loss train | Supervised Contrastive",
-                loss.item(),
-                epoch * len(train_loader) + batch_idx,
-            )
-            progress_bar(
-                batch_idx,
-                len(train_loader),
-                "Loss: %.3f " % (train_loss / (batch_idx + 1)),
-            )
+#         avg_loss = train_loss / (batch_idx + 1)
+#         # Only check every 10 epochs otherwise you will always save
+#         if epoch % 10 == 0:
+#             if (train_loss / (batch_idx + 1)) < best_loss:
+#                 print("Saving..")
+#                 state = {
+#                     "net": model.state_dict(),
+#                     "avg_loss": avg_loss,
+#                     "epoch": epoch,
+#                 }
+#                 if not os.path.isdir("checkpoint"):
+#                     os.mkdir("checkpoint")
+#                 torch.save(state, "./checkpoint/ckpt_contrastive.pth")
+#                 best_loss = avg_loss
 
-        avg_loss = train_loss / (batch_idx + 1)
-        # Only check every 10 epochs otherwise you will always save
-        if epoch % 10 == 0:
-            if (train_loss / (batch_idx + 1)) < best_loss:
-                print("Saving..")
-                state = {
-                    "net": model.state_dict(),
-                    "avg_loss": avg_loss,
-                    "epoch": epoch,
-                }
-                if not os.path.isdir("checkpoint"):
-                    os.mkdir("checkpoint")
-                torch.save(state, "./checkpoint/ckpt_contrastive.pth")
-                best_loss = avg_loss
+#         adjust_learning_rate(optimizer, epoch, mode="contrastive", args=args)
 
-        adjust_learning_rate(optimizer, epoch, mode="contrastive", args=args)
+# def train_cross_entropy(model, train_loader, test_loader, criterion, optimizer, writer, args):
+#     """
+#     :param model: torch.nn.Module Model
+#     :param train_loader: torch.utils.data.DataLoader
+#     :param test_loader: torch.utils.data.DataLoader
+#     :param criterion: torch.nn.Module Loss
+#     :param optimizer: torch.optim
+#     :param writer: torch.utils.tensorboard.SummaryWriter
+#     :param args: argparse.Namespace
+#     :return:
+#     """
 
+#     for epoch in range(args.n_epochs_cross_entropy):  # loop over the dataset multiple times
+#         print("Epoch [%d/%d]" % (epoch + 1, args.n_epochs_cross_entropy))
 
-def train_cross_entropy(model, train_loader, test_loader, criterion, optimizer, writer, args):
-    """
-    :param model: torch.nn.Module Model
-    :param train_loader: torch.utils.data.DataLoader
-    :param test_loader: torch.utils.data.DataLoader
-    :param criterion: torch.nn.Module Loss
-    :param optimizer: torch.optim
-    :param writer: torch.utils.tensorboard.SummaryWriter
-    :param args: argparse.Namespace
-    :return:
-    """
+#         model.train()
+#         train_loss = 0
+#         correct = 0
+#         total = 0
+#         for batch_idx, (inputs, targets) in enumerate(train_loader):
+#             inputs, targets = inputs.to(args.device), targets.to(args.device)
+#             optimizer.zero_grad()
+#             outputs = model(inputs)
+#             loss = criterion(outputs, targets)
+#             loss.backward()
+#             optimizer.step()
 
-    for epoch in range(args.n_epochs_cross_entropy):  # loop over the dataset multiple times
-        print("Epoch [%d/%d]" % (epoch + 1, args.n_epochs_cross_entropy))
+#             train_loss += loss.item()
+#             _, predicted = outputs.max(1)
 
-        model.train()
-        train_loss = 0
-        correct = 0
-        total = 0
-        for batch_idx, (inputs, targets) in enumerate(train_loader):
-            inputs, targets = inputs.to(args.device), targets.to(args.device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
+#             total_batch = targets.size(0)
+#             correct_batch = predicted.eq(targets).sum().item()
+#             total += total_batch
+#             correct += correct_batch
 
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
+#             writer.add_scalar(
+#                 "Loss train | Cross Entropy",
+#                 loss.item(),
+#                 epoch * len(train_loader) + batch_idx,
+#             )
+#             writer.add_scalar(
+#                 "Accuracy train | Cross Entropy",
+#                 correct_batch / total_batch,
+#                 epoch * len(train_loader) + batch_idx,
+#             )
+#             progress_bar(
+#                 batch_idx,
+#                 len(train_loader),
+#                 "Loss: %.3f | Acc: %.3f%% (%d/%d)"
+#                 % (
+#                     train_loss / (batch_idx + 1),
+#                     100.0 * correct / total,
+#                     correct,
+#                     total,
+#                 ),
+#             )
 
-            total_batch = targets.size(0)
-            correct_batch = predicted.eq(targets).sum().item()
-            total += total_batch
-            correct += correct_batch
+#         validation(epoch, model, test_loader, criterion, writer, args)
 
-            writer.add_scalar(
-                "Loss train | Cross Entropy",
-                loss.item(),
-                epoch * len(train_loader) + batch_idx,
-            )
-            writer.add_scalar(
-                "Accuracy train | Cross Entropy",
-                correct_batch / total_batch,
-                epoch * len(train_loader) + batch_idx,
-            )
-            progress_bar(
-                batch_idx,
-                len(train_loader),
-                "Loss: %.3f | Acc: %.3f%% (%d/%d)"
-                % (
-                    train_loss / (batch_idx + 1),
-                    100.0 * correct / total,
-                    correct,
-                    total,
-                ),
-            )
+#         adjust_learning_rate(optimizer, epoch, mode='cross_entropy', args=args)
+#     print("Finished Training")
 
-        validation(epoch, model, test_loader, criterion, writer, args)
+# def validation(epoch, model, test_loader, criterion, writer, args):
+#     """
+#     :param epoch: int
+#     :param model: torch.nn.Module, Model
+#     :param test_loader: torch.utils.data.DataLoader
+#     :param criterion: torch.nn.Module, Loss
+#     :param writer: torch.utils.tensorboard.SummaryWriter
+#     :param args: argparse.Namespace
+#     :return:
+#     """
 
-        adjust_learning_rate(optimizer, epoch, mode='cross_entropy', args=args)
-    print("Finished Training")
+#     model.eval()
+#     test_loss = 0
+#     correct = 0
+#     total = 0
 
+#     with torch.no_grad():
+#         for batch_idx, (inputs, targets) in enumerate(test_loader):
+#             inputs, targets = inputs.to(args.device), targets.to(args.device)
+#             outputs = model(inputs)
+#             loss = criterion(outputs, targets)
 
-def validation(epoch, model, test_loader, criterion, writer, args):
-    """
-    :param epoch: int
-    :param model: torch.nn.Module, Model
-    :param test_loader: torch.utils.data.DataLoader
-    :param criterion: torch.nn.Module, Loss
-    :param writer: torch.utils.tensorboard.SummaryWriter
-    :param args: argparse.Namespace
-    :return:
-    """
+#             test_loss += loss.item()
+#             _, predicted = outputs.max(1)
+#             total += targets.size(0)
+#             correct += predicted.eq(targets).sum().item()
 
-    model.eval()
-    test_loss = 0
-    correct = 0
-    total = 0
+#             progress_bar(
+#                 batch_idx,
+#                 len(test_loader),
+#                 "Loss: %.3f | Acc: %.3f%% (%d/%d)"
+#                 % (
+#                     test_loss / (batch_idx + 1),
+#                     100.0 * correct / total,
+#                     correct,
+#                     total,
+#                 ),
+#             )
 
-    with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(test_loader):
-            inputs, targets = inputs.to(args.device), targets.to(args.device)
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
+#     # Save checkpoint.
+#     acc = 100.0 * correct / total
+#     writer.add_scalar("Accuracy validation | Cross Entropy", acc, epoch)
 
-            test_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-
-            progress_bar(
-                batch_idx,
-                len(test_loader),
-                "Loss: %.3f | Acc: %.3f%% (%d/%d)"
-                % (
-                    test_loss / (batch_idx + 1),
-                    100.0 * correct / total,
-                    correct,
-                    total,
-                ),
-            )
-
-    # Save checkpoint.
-    acc = 100.0 * correct / total
-    writer.add_scalar("Accuracy validation | Cross Entropy", acc, epoch)
-
-    if acc > args.best_acc:
-        print("Saving..")
-        state = {
-            "net": model.state_dict(),
-            "acc": acc,
-            "epoch": epoch,
-        }
-        if not os.path.isdir("checkpoint"):
-            os.mkdir("checkpoint")
-        torch.save(state, "./checkpoint/ckpt_cross_entropy.pth")
-        args.best_acc = acc
+#     if acc > args.best_acc:
+#         print("Saving..")
+#         state = {
+#             "net": model.state_dict(),
+#             "acc": acc,
+#             "epoch": epoch,
+#         }
+#         if not os.path.isdir("checkpoint"):
+#             os.mkdir("checkpoint")
+#         torch.save(state, "./checkpoint/ckpt_cross_entropy.pth")
+#         args.best_acc = acc
 
 
 def main():
@@ -285,169 +281,169 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args.device = device
 
-    if args.dataset == "cifar10":
-        mean = (0.4914, 0.4822, 0.4465)
-        std = (0.2023, 0.1994, 0.2010)
-        transform_train = [
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-        ]
-        if args.auto_augment:
-            transform_train.append(AutoAugment())
-        transform_train.extend(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(mean, std),
-            ]
-        )
-        transform_train = transforms.Compose(transform_train)
+    # if args.dataset == "cifar10":
+    #     mean = (0.4914, 0.4822, 0.4465)
+    #     std = (0.2023, 0.1994, 0.2010)
+    #     transform_train = [
+    #         transforms.RandomCrop(32, padding=4),
+    #         transforms.RandomHorizontalFlip(),
+    #     ]
+    #     if args.auto_augment:
+    #         transform_train.append(AutoAugment())
+    #     transform_train.extend(
+    #         [
+    #             transforms.ToTensor(),
+    #             transforms.Normalize(mean, std),
+    #         ]
+    #     )
+    #     transform_train = transforms.Compose(transform_train)
 
-        transform_test = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(mean, std),
-            ]
-        )
+    #     transform_test = transforms.Compose(
+    #         [
+    #             transforms.ToTensor(),
+    #             transforms.Normalize(mean, std),
+    #         ]
+    #     )
 
-        train_set = datasets.CIFAR10(root="~/data", train=True, download=True, transform=transform_train)
-        train_loader = torch.utils.data.DataLoader(
-            train_set,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-        )
+    #     train_set = datasets.CIFAR10(root="~/data", train=True, download=True, transform=transform_train)
+    #     train_loader = torch.utils.data.DataLoader(
+    #         train_set,
+    #         batch_size=args.batch_size,
+    #         shuffle=True,
+    #         num_workers=args.num_workers,
+    #     )
 
-        test_set = datasets.CIFAR10(root="~/data", train=False, download=True, transform=transform_test)
-        test_loader = torch.utils.data.DataLoader(
-            test_set,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-        )
+    #     test_set = datasets.CIFAR10(root="~/data", train=False, download=True, transform=transform_test)
+    #     test_loader = torch.utils.data.DataLoader(
+    #         test_set,
+    #         batch_size=args.batch_size,
+    #         shuffle=False,
+    #         num_workers=args.num_workers,
+    #     )
 
-        num_classes = 10
+    #     num_classes = 10
 
-    elif args.dataset == "cifar100":
-        mean = (0.5071, 0.4867, 0.4408)
-        std = (0.2675, 0.2565, 0.2761)
-        transform_train = [
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-        ]
-        if args.auto_augment:
-            transform_train.append(AutoAugment())
+    # elif args.dataset == "cifar100":
+    #     mean = (0.5071, 0.4867, 0.4408)
+    #     std = (0.2675, 0.2565, 0.2761)
+    #     transform_train = [
+    #         transforms.RandomCrop(32, padding=4),
+    #         transforms.RandomHorizontalFlip(),
+    #     ]
+    #     if args.auto_augment:
+    #         transform_train.append(AutoAugment())
 
-        transform_train.extend(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(mean, std),
-            ]
-        )
-        transform_train = transforms.Compose(transform_train)
+    #     transform_train.extend(
+    #         [
+    #             transforms.ToTensor(),
+    #             transforms.Normalize(mean, std),
+    #         ]
+    #     )
+    #     transform_train = transforms.Compose(transform_train)
 
-        transform_test = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(mean, std),
-            ]
-        )
+    #     transform_test = transforms.Compose(
+    #         [
+    #             transforms.ToTensor(),
+    #             transforms.Normalize(mean, std),
+    #         ]
+    #     )
 
-        train_set = datasets.CIFAR100(root="~/data", train=True, download=True, transform=transform_train)
-        train_loader = torch.utils.data.DataLoader(
-            train_set,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-        )
+    #     train_set = datasets.CIFAR100(root="~/data", train=True, download=True, transform=transform_train)
+    #     train_loader = torch.utils.data.DataLoader(
+    #         train_set,
+    #         batch_size=args.batch_size,
+    #         shuffle=True,
+    #         num_workers=args.num_workers,
+    #     )
 
-        test_set = datasets.CIFAR100(root="~/data", train=False, download=True, transform=transform_test)
-        test_loader = torch.utils.data.DataLoader(
-            test_set,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-        )
+    #     test_set = datasets.CIFAR100(root="~/data", train=False, download=True, transform=transform_test)
+    #     test_loader = torch.utils.data.DataLoader(
+    #         test_set,
+    #         batch_size=args.batch_size,
+    #         shuffle=False,
+    #         num_workers=args.num_workers,
+    #     )
 
-        num_classes = 100
+    #     num_classes = 100
 
-    model = get_resnet_contrastive(args.model, num_classes)
-    model = model.to(args.device)
+    # model = get_resnet_contrastive(args.model, num_classes)
+    # model = model.to(args.device)
 
-    cudnn.benchmark = True
+    # cudnn.benchmark = True
 
-    if not os.path.isdir("logs"):
-        os.makedirs("logs")
+    # if not os.path.isdir("logs"):
+    #     os.makedirs("logs")
 
-    writer = SummaryWriter("logs")
+    # writer = SummaryWriter("logs")
 
-    if args.training_mode == "contrastive":
-        train_contrastive_transform = DuplicateSampleTransform(transform_train)
-        if args.dataset == "cifar10":
-            train_set_contrastive = datasets.CIFAR10(
-                root="~/data",
-                train=True,
-                download=True,
-                transform=train_contrastive_transform,
-            )
-        elif args.dataset == "cifar100":
-            train_set_contrastive = datasets.CIFAR100(
-                root="~/data",
-                train=True,
-                download=True,
-                transform=train_contrastive_transform,
-            )
+    # if args.training_mode == "contrastive":
+    #     train_contrastive_transform = DuplicateSampleTransform(transform_train)
+    #     if args.dataset == "cifar10":
+    #         train_set_contrastive = datasets.CIFAR10(
+    #             root="~/data",
+    #             train=True,
+    #             download=True,
+    #             transform=train_contrastive_transform,
+    #         )
+    #     elif args.dataset == "cifar100":
+    #         train_set_contrastive = datasets.CIFAR100(
+    #             root="~/data",
+    #             train=True,
+    #             download=True,
+    #             transform=train_contrastive_transform,
+    #         )
 
-        train_loader_contrastive = torch.utils.data.DataLoader(
-            train_set_contrastive,
-            batch_size=args.batch_size,
-            shuffle=True,
-            drop_last=True,
-            num_workers=args.num_workers,
-        )
+    #     train_loader_contrastive = torch.utils.data.DataLoader(
+    #         train_set_contrastive,
+    #         batch_size=args.batch_size,
+    #         shuffle=True,
+    #         drop_last=True,
+    #         num_workers=args.num_workers,
+    #     )
 
-        model = model.to(args.device)
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=args.lr_contrastive,
-            momentum=args.momentum,
-            weight_decay=args.weight_decay,
-        )
+    #     model = model.to(args.device)
+    #     optimizer = optim.SGD(
+    #         model.parameters(),
+    #         lr=args.lr_contrastive,
+    #         momentum=args.momentum,
+    #         weight_decay=args.weight_decay,
+    #     )
 
-        criterion = SupervisedContrastiveLoss(temperature=args.temperature)
-        criterion.to(args.device)
-        train_contrastive(model, train_loader_contrastive, criterion, optimizer, writer, args)
+    #     criterion = SupervisedContrastiveLoss(temperature=args.temperature)
+    #     criterion.to(args.device)
+    #     train_contrastive(model, train_loader_contrastive, criterion, optimizer, writer, args)
 
-        # Load checkpoint.
-        print("==> Resuming from checkpoint..")
-        assert os.path.isdir("checkpoint"), "Error: no checkpoint directory found!"
-        checkpoint = torch.load("./checkpoint/ckpt_contrastive.pth")
-        model.load_state_dict(checkpoint["net"])
+    #     # Load checkpoint.
+    #     print("==> Resuming from checkpoint..")
+    #     assert os.path.isdir("checkpoint"), "Error: no checkpoint directory found!"
+    #     checkpoint = torch.load("./checkpoint/ckpt_contrastive.pth")
+    #     model.load_state_dict(checkpoint["net"])
 
-        model.freeze_projection()
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=args.lr_cross_entropy,
-            momentum=args.momentum,
-            weight_decay=args.weight_decay,
-        )
+    #     model.freeze_projection()
+    #     optimizer = optim.SGD(
+    #         model.parameters(),
+    #         lr=args.lr_cross_entropy,
+    #         momentum=args.momentum,
+    #         weight_decay=args.weight_decay,
+    #     )
 
-        criterion = nn.CrossEntropyLoss()
-        criterion.to(args.device)
+    #     criterion = nn.CrossEntropyLoss()
+    #     criterion.to(args.device)
 
-        args.best_acc = 0.0
-        train_cross_entropy(model, train_loader, test_loader, criterion, optimizer, writer, args)
-    else:
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=args.lr_cross_entropy,
-            momentum=args.momentum,
-            weight_decay=args.weight_decay,
-        )
-        criterion = nn.CrossEntropyLoss()
-        criterion.to(args.device)
+    #     args.best_acc = 0.0
+    #     train_cross_entropy(model, train_loader, test_loader, criterion, optimizer, writer, args)
+    # else:
+    #     optimizer = optim.SGD(
+    #         model.parameters(),
+    #         lr=args.lr_cross_entropy,
+    #         momentum=args.momentum,
+    #         weight_decay=args.weight_decay,
+    #     )
+    #     criterion = nn.CrossEntropyLoss()
+    #     criterion.to(args.device)
 
-        args.best_acc = 0.0
-        train_cross_entropy(model, train_loader, test_loader, criterion, optimizer, writer, args)
+    #     args.best_acc = 0.0
+    #     train_cross_entropy(model, train_loader, test_loader, criterion, optimizer, writer, args)
 
 
 if __name__ == "__main__":
