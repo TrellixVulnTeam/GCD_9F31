@@ -18,7 +18,7 @@ class SupervisedContrastiveLoss(nn.Module):
         :param targets: torch.Tensor, shape [batch_size]
         :return: torch.Tensor, scalar
         """
-        device = torch.device("cuda") if projections.is_cuda else torch.device("cpu")
+        device = torch.device("cuda:2") if projections.is_cuda else torch.device("cpu")
 
         dot_product_tempered = torch.mm(projections, projections.T) / self.temperature
         # Minus max for numerical stability with exponential. Same done in cross entropy. Epsilon added to avoid log(0)

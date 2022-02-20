@@ -1,4 +1,5 @@
 import argparse
+from inspect import ArgSpec
 import math
 import numpy as np
 import os
@@ -15,6 +16,7 @@ from loss.spc import SupervisedContrastiveLoss
 from data.cifarloader import CIFAR10Loader, CIFAR100Loader
 import utils
 import vision_transformer as vits
+from tqdm import tqdm
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -26,11 +28,8 @@ def parse_args():
     )
     parser.add_argument("--batch_size", default=128, type=int, help="On the contrastive step this will be multiplied by two.")
     parser.add_argument("--temperature", default=0.07, type=float, help="Constant for loss no thorough")
-    parser.add_argument("--n_epochs_contrastive", default=200, type=int)
+    parser.add_argument("--n_epochs", default=200, type=int)
     parser.add_argument("--lr_contrastive", default=1e-1, type=float)
-    parser.add_argument("--cosine", default=True, type=bool, help="Check this to use cosine annealing instead")
-    parser.add_argument("--lr_decay_rate", type=float, default=0.1, help="Lr decay rate when cosine is false")
-    parser.add_argument( "--lr_decay_epochs", type=list, default=[150, 300, 500], help="If cosine false at what epoch to decay lr with lr_decay_rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for SGD")
     parser.add_argument("--momentum", default=0.9, type=float, help="Momentum for SGD")
     parser.add_argument("--num_workers", default=4, type=int, help="number of workers for Dataloader")
@@ -56,31 +55,6 @@ def dino_vitb16_nohead(pretrained=True, **kwargs):
         model.load_state_dict(state_dict, strict=True)
     return model
 
-def adjust_learning_rate(optimizer, epoch, mode, args):
-    """
-    :param optimizer: torch.optim
-    :param epoch: int
-    :param mode: str
-    :param args: argparse.Namespace
-    :return: None
-    """
-    if mode == "contrastive":
-        lr = args.lr_contrastive
-        n_epochs = args.n_epochs_contrastive
-    else:
-        raise ValueError("Mode %s unknown" % mode)
-
-    if args.cosine:
-        eta_min = lr * (args.lr_decay_rate ** 3)
-        lr = eta_min + (lr - eta_min) * (1 + math.cos(math.pi * epoch / n_epochs)) / 2
-    else:
-        n_steps_passed = np.sum(epoch > np.asarray(args.lr_decay_epochs))
-        if n_steps_passed > 0:
-            lr = lr * (args.lr_decay_rate ** n_steps_passed)
-
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
-
 def train_contrastive(model, train_loader, eval_loader, criterion, optimizer, writer, args):
     """
     :param model: torch.nn.Module Model
@@ -93,23 +67,21 @@ def train_contrastive(model, train_loader, eval_loader, criterion, optimizer, wr
     """
     model.train()
     best_loss = float("inf")
+    exp_lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.n_epochs, eta_min=0, last_epoch=-1)
 
-    for epoch in range(args.n_epochs_contrastive):
-        print("Epoch [%d/%d]" % (epoch + 1, args.n_epochs_contrastive))
-
+    for epoch in range(args.n_epochs):
+        print("Epoch [%d/%d]" % (epoch + 1, args.n_epochs))
+        loss_record = utils.AverageMeter()
         train_loss = 0
-        for batch_idx, (inputs, targets) in enumerate(train_loader):
-            inputs = torch.cat(inputs)
-            targets = targets.repeat(2)
-
-            inputs, targets = inputs.to(args.device), targets.to(args.device)
+        exp_lr_scheduler.step()
+        for batch_idx, (x, label, idx) in enumerate(tqdm(train_loader)):
+            x, label = x.to(args.device), label.to(args.device)
+            output1 = model(x)
+            loss= criterion(output1, label)
+            loss_record.update(loss.item(), x.size(0))
             optimizer.zero_grad()
-
-            projections = model.forward_constrative(inputs)
-            loss = criterion(projections, targets)
             loss.backward()
             optimizer.step()
-
             train_loss += loss.item()
             writer.add_scalar(
                 "Loss train | Supervised Contrastive",
@@ -119,26 +91,24 @@ def train_contrastive(model, train_loader, eval_loader, criterion, optimizer, wr
             progress_bar(
                 batch_idx,
                 len(train_loader),
-                "Loss: %.3f " % (train_loss / (batch_idx + 1)),
+                "Loss: %.3f " % loss_record.avg,
             )
 
-        avg_loss = train_loss / (batch_idx + 1)
         # Only check every 10 epochs otherwise you will always save
         if epoch % 10 == 0:
-            if (train_loss / (batch_idx + 1)) < best_loss:
+            if loss_record.avg < best_loss:
                 print("Saving..")
                 state = {
                     "net": model.state_dict(),
-                    "avg_loss": avg_loss,
+                    "avg_loss": loss_record.avg,
                     "epoch": epoch,
                 }
                 if not os.path.isdir("checkpoint"):
                     os.mkdir("checkpoint")
                 torch.save(state, "./checkpoint/ckpt_contrastive.pth")
-                best_loss = avg_loss
+                best_loss = loss_record.avg
 
-        test(epoch, model, eval_loader, criterion, writer, args)
-        adjust_learning_rate(optimizer, epoch, mode="contrastive", args=args)
+        #test(epoch, model, eval_loader, criterion, writer, args)
 
 
 
