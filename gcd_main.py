@@ -28,7 +28,7 @@ def parse_args():
     )
     parser.add_argument("--batch_size", default=128, type=int, help="On the contrastive step this will be multiplied by two.")
     parser.add_argument("--temperature", default=0.07, type=float, help="Constant for loss no thorough")
-    parser.add_argument("--n_epochs", default=200, type=int)
+    parser.add_argument("--n_epochs", default=300, type=int)
     parser.add_argument("--lr_contrastive", default=1e-1, type=float)
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for SGD")
     parser.add_argument("--momentum", default=0.9, type=float, help="Momentum for SGD")
@@ -95,7 +95,7 @@ def train_contrastive(model, train_loader, eval_loader, criterion, optimizer, wr
             )
 
         # Only check every 10 epochs otherwise you will always save
-        if epoch % 10 == 0:
+        if epoch % 20 == 0:
             if loss_record.avg < best_loss:
                 print("Saving..")
                 state = {
@@ -108,7 +108,7 @@ def train_contrastive(model, train_loader, eval_loader, criterion, optimizer, wr
                 torch.save(state, "./checkpoint/ckpt_contrastive.pth")
                 best_loss = loss_record.avg
 
-        #test(epoch, model, eval_loader, criterion, writer, args)
+        test(epoch, model, eval_loader, criterion, writer, args)
 
 
 
@@ -129,7 +129,7 @@ def test(epoch, model, test_loader, criterion, writer, args):
     total = 0
 
     with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(test_loader):
+        for batch_idx, (inputs, targets, idx) in enumerate(test_loader):
             inputs, targets = inputs.to(args.device), targets.to(args.device)
             outputs = model(inputs)
             loss = criterion(outputs, targets)
@@ -200,6 +200,7 @@ def main():
         weight_decay=args.weight_decay,
     )
 
+    args.best_acc = 0.0
     criterion = SupervisedContrastiveLoss(temperature=args.temperature)
     criterion.to(args.device)
     train_contrastive(model, labeled_train_loader, labeled_eval_loader, criterion, optimizer, writer, args)
