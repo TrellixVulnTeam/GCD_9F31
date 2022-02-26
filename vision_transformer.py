@@ -288,5 +288,4 @@ class DINOHead(nn.Module):
         x = self.mlp(x)
         x = nn.functional.normalize(x, dim=-1, p=2)
         x = self.last_layer(x)
-        x = x.view(x.size(0), -1)
         return x

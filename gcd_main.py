@@ -1,21 +1,18 @@
 import argparse
-from inspect import ArgSpec
-import math
-import numpy as np
+import time
 import os
+import sys
 import torch
 
 from torch.backends import cudnn
-from torch import nn
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
-from torchvision import datasets, transforms
 
-from utils import progress_bar
+from utils import save_model
+from utils import AverageMeter
 from loss.spc import SupervisedContrastiveLoss
-from data.cifarloader import CIFAR10Loader, CIFAR100Loader
-from data.rotationloader import DataLoader, GenericDataset
-import utils
+from loss.sspc import SelfSupervisedContrastiveLoss
+from data.cifarloader import CIFAR100SampledSetLoader, CIFAR10SampledSetLoader, CIFAR100Loader, CIFAR10Loader
 import vision_transformer as vits
 from vision_transformer import DINOHead
 from tqdm import tqdm
@@ -30,7 +27,7 @@ def parse_args():
     )
     parser.add_argument("--batch_size", default=128, type=int, help="On the contrastive step this will be multiplied by two.")
     parser.add_argument("--temperature", default=0.07, type=float, help="Constant for loss no thorough")
-    parser.add_argument("--n_epochs", default=25, type=int)
+    parser.add_argument("--epochs", default=200, type=int)
     parser.add_argument("--lr", default=1e-1, type=float)
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for SGD")
     parser.add_argument("--momentum", default=0.9, type=float, help="Momentum for SGD")
@@ -38,12 +35,15 @@ def parse_args():
     parser.add_argument('--num_unlabeled_classes', default=5, type=int)
     parser.add_argument('--num_labeled_classes', default=5, type=int)
     parser.add_argument('--dataset_root', type=str, default='./data/datasets/CIFAR/')
+    parser.add_argument('--save_freq', type=int, default=10, help='save frequency')
+    parser.add_argument('--print_freq', type=int, default=5, help='print frequency')
+    parser.add_argument("--loss_reg", default=0.35, type=float, help="Loss regularization")
 
     args = parser.parse_args()
 
     return args
 
-def dino_vitb16_nohead(pretrained=True, **kwargs):
+def get_model(pretrained=True, **kwargs):
     model = vits.__dict__["vit_base"](patch_size=16, num_classes=0, **kwargs)
     if pretrained:
         state_dict = torch.hub.load_state_dict_from_url(
@@ -51,67 +51,121 @@ def dino_vitb16_nohead(pretrained=True, **kwargs):
             map_location="cpu",
         )
         model.load_state_dict(state_dict, strict=True)
+
+    for param in model.parameters():
+        param.requires_grad = False
+    model.norm.bias.requires_grad = True
+    model.norm.weight.requires_grad = True
+    for name, param in model.named_parameters():
+        if name.startswith('blocks.11'):
+            param.requires_grad = True
+    
     return model
 
-def supervised_train(model, train_loader, eval_loader, criterion, optimizer, writer, args):
-    """
-    :param model: torch.nn.Module Model
-    :param train_loader: torch.utils.data.DataLoader
-    :param criterion: torch.nn.Module Loss
-    :param optimizer: torch.optim
-    :param writer: torch.utils.tensorboard.SummaryWriter
-    :param args: argparse.Namespace
-    :return: None
-    """
+def train_supervised(model, train_loader, eval_loader, criterion, optimizer, writer, epoch, args):
     model.train()
-    best_loss = float("inf")
-    exp_lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.n_epochs, eta_min=0, last_epoch=-1)
 
-    for epoch in range(args.n_epochs):
-        print("Epoch [%d/%d]" % (epoch + 1, args.n_epochs))
-        loss_record = utils.AverageMeter()
-        train_loss = 0
-        for batch_idx, (x, label, idx) in enumerate(tqdm(train_loader)):
-            x, label = x.to(args.device), label.to(args.device)
-            optimizer.zero_grad()
-            output = model(x)
-            loss= criterion(output, label)
-            loss_record.update(loss.item(), x.size(0))
-            loss.backward()
-            optimizer.step()
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+    losses = AverageMeter()
 
-            train_loss += loss.item()
-            writer.add_scalar(
-                "Loss train | Supervised Contrastive",
-                loss.item(),
-                epoch * len(train_loader) + batch_idx,
-            )
-            progress_bar(
-                batch_idx,
-                len(train_loader),
-                "Loss: %.3f " % loss_record.avg,
-            )
+    end = time.time()
+    
+    for batch_idx, (images, labels, idx) in enumerate(tqdm(train_loader)):
+        data_time.update(time.time() - end)
 
-        if epoch >= 5:
-            exp_lr_scheduler.step()
+        images = torch.cat([images[0], images[1]], dim=0)
+        images, labels = images.to(args.device), labels.to(args.device)
+        bsz = labels.shape[0]
+        # compute loss
+        features = model.head.forward(model(images))
+        f1, f2 = torch.split(features, [bsz, bsz], dim=0)
+        features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
+        loss = criterion(features, labels)
 
-        # Only check every 10 epochs otherwise you will always save
-        if epoch % 10 == 0:
-            if loss_record.avg < best_loss:
-                # print("Saving..")
-                # state = {
-                #     "net": model.state_dict(),
-                #     "avg_loss": loss_record.avg,
-                #     "epoch": epoch,
-                # }
-                # if not os.path.isdir("checkpoint"):
-                #     os.mkdir("checkpoint")
-                # torch.save(state, "./checkpoint/ckpt_contrastive.pth")
-                best_loss = loss_record.avg
+        # update metric
+        losses.update(loss.item(), bsz)
 
-        test(epoch, model, eval_loader, criterion, writer, args)
+        # SGD
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
 
+        writer.add_scalar(
+            "Loss train | Supervised Contrastive",
+            loss.item(),
+            epoch * len(train_loader) + batch_idx,
+        )
+    
+        # print info
+        if (batch_idx + 1) % args.print_freq == 0:
+            print('Train: [{0}][{1}/{2}]\t'
+                  'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'loss {loss.val:.3f} ({loss.avg:.3f})'.format(
+                   epoch, batch_idx + 1, len(train_loader), batch_time=batch_time,
+                   data_time=data_time, loss=losses))
+            sys.stdout.flush()
+
+    
+    return losses.avg
+
+def train_unsupervised(model, train_loader, criterion, optimizer, writer, epoch, args):
+    model.train()
+
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+    losses = AverageMeter()
+
+    end = time.time()
+    
+    for batch_idx, (images, labels, idx) in enumerate(tqdm(train_loader)):
+        data_time.update(time.time() - end)
+
+        images = torch.cat([images[0], images[1]], dim=0)
+        images, labels = images.to(args.device), labels.to(args.device)
+        bsz = labels.shape[0]
+        # compute loss
+        features = model.head.forward(model(images))
+        f1, f2 = torch.split(features, [bsz, bsz], dim=0)
+        features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
+        loss = criterion(features)
+
+        # update metric
+        losses.update(loss.item(), bsz)
+
+        # SGD
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        writer.add_scalar(
+            "Loss train | Unsupervised Contrastive",
+            loss.item(),
+            epoch * len(train_loader) + batch_idx,
+        )
+    
+        # print info
+        if (batch_idx + 1) % args.print_freq == 0:
+            print('Train: [{0}][{1}/{2}]\t'
+                  'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'loss {loss.val:.3f} ({loss.avg:.3f})'.format(
+                   epoch, batch_idx + 1, len(train_loader), batch_time=batch_time,
+                   data_time=data_time, loss=losses))
+            sys.stdout.flush()
+
+    
+    return losses.avg
+    
 
 def test(epoch, model, test_loader, criterion, writer, args):
     """
@@ -172,65 +226,106 @@ def test(epoch, model, test_loader, criterion, writer, args):
 
 def main():
     args = parse_args()
-    device = "cuda:2" if torch.cuda.is_available() else "cpu"
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     args.device = device
 
-    #upervised
+    # build data loader supervised
     if args.dataset == "cifar100":
-        s_labeled_train_loader = CIFAR100Loader(root=args.dataset_root, batch_size=args.batch_size, split='train', aug='once', shuffle=True, target_list = range(args.num_labeled_classes))
-        s_labeled_eval_loader = CIFAR100Loader(root=args.dataset_root, batch_size=args.batch_size, split='test', aug=None, shuffle=False, target_list = range(args.num_labeled_classes))
+        s_train_loader, s_valid_loader, s_test_loader = CIFAR100SampledSetLoader(root=args.dataset_root, 
+                                                                                batch_size=args.batch_size, 
+                                                                                aug='twice', 
+                                                                                num_workers=args.num_workers,
+                                                                                shuffle=True)
         num_classes =  args.num_labeled_classes + args.num_unlabeled_classes
     else:
-        s_labeled_train_loader = CIFAR10Loader(root=args.dataset_root, batch_size=args.batch_size, split='train', aug='once', shuffle=True, target_list = range(args.num_labeled_classes))
-        s_labeled_eval_loader = CIFAR10Loader(root=args.dataset_root, batch_size=args.batch_size, split='test', aug=None, shuffle=False, target_list = range(args.num_labeled_classes))
+        s_train_loader, s_valid_loader, s_test_loader = CIFAR10SampledSetLoader(root=args.dataset_root, 
+                                                                                batch_size=args.batch_size, 
+                                                                                aug='twice', 
+                                                                                num_workers=args.num_workers, 
+                                                                                shuffle=True)
         num_classes = args.num_labeled_classes + args.num_unlabeled_classes
 
-    #unsupervised
-    u_dataset_train = GenericDataset(dataset_name=args.dataset, split='train', dataset_root=args.dataset_root)
-    u_dataset_test = GenericDataset(dataset_name=args.dataset, split='test', dataset_root=args.dataset_root)
-    u_dloader_train = DataLoader(dataset=u_dataset_train, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True)
-    u_dloader_test = DataLoader(dataset=u_dataset_test, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=False)
+    # build data loader unsupervised
+    if args.dataset == "cifar100":
+        u_train_loader = CIFAR100Loader(root=args.dataset_root, 
+                                        batch_size=args.batch_size, 
+                                        aug='twice', 
+                                        num_workers=args.num_workers,
+                                        shuffle=True)
+        num_classes =  args.num_labeled_classes + args.num_unlabeled_classes
+    else:
+        u_train_loader = CIFAR10Loader(root=args.dataset_root, 
+                                        batch_size=args.batch_size, 
+                                        aug='twice', 
+                                        num_workers=args.num_workers,
+                                        shuffle=True)
+        num_classes = args.num_labeled_classes + args.num_unlabeled_classes
 
+    # load dino model
+    model = get_model()
+    model.head = DINOHead(in_dim=model.num_features, out_dim=num_classes)
+    model = model.to(device)
+    cudnn.benchmark = True
 
-    # load dino (no classfication head)
-    model = dino_vitb16_nohead()
-    # freeze model
-    # for param in model.parameters():
-    #     param.requires_grad = False
-    # #set classifier
-    # model.head = DINOHead(in_dim=32, out_dim=num_classes)
-    # for param in model.head.parameters():
-    #     param.requires_grad = True
+    if not os.path.isdir("logs"):
+        os.makedirs("logs")
+
+    if not os.path.isdir("checkpoint"):
+        os.mkdir("checkpoint")
+
+    s_writer = SummaryWriter("logs")
+    u_writer = SummaryWriter("logs")
+    g_writer = SummaryWriter("logs")
     
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=args.lr,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay,
+    )
     
-    print(model)
-    # model = model.to(device)
+    args.best_acc = 0.0
+    s_criterion = SupervisedContrastiveLoss(temperature=args.temperature)
+    u_criterion = SelfSupervisedContrastiveLoss(temperature=args.temperature)
+    s_criterion.to(args.device)
+    u_criterion.to(args.device)
 
-    # cudnn.benchmark = True
+    print(len(u_train_loader))
 
-    # if not os.path.isdir("logs"):
-    #     os.makedirs("logs")
+    #train
+    for epoch in range(1, args.epochs + 1):
+        #decay schedule
+        exp_lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0, last_epoch=-1)
 
-    # writer = SummaryWriter("logs")
-    
-    # optimizer = optim.SGD(
-    #     model.parameters(),
-    #     lr=args.lr,
-    #     momentum=args.momentum,
-    #     weight_decay=args.weight_decay,
-    # )
+        time1 = time.time()
+        # s_loss = train_supervised(model, s_train_loader, s_valid_loader, s_criterion, optimizer, s_writer, epoch, args)
+        u_loss = train_unsupervised(model, u_train_loader, u_criterion, optimizer, u_writer, epoch, args)
+        time2 = time.time()
 
-    # args.best_acc = 0.0
-    # criterion = SupervisedContrastiveLoss(temperature=args.temperature)
-    # criterion.to(args.device)
-    # supervised_train(model, s_labeled_train_loader, s_labeled_eval_loader, criterion, optimizer, writer, args)
+        # total_loss = ((1 - args.loss_reg) * u_loss) + (args.loss_reg * s_loss)
 
-    # # Load checkpoint.
-    # print("==> Resuming from checkpoint..")
-    # assert os.path.isdir("checkpoint"), "Error: no checkpoint directory found!"
-    # checkpoint = torch.load("./checkpoint/ckpt_contrastive.pth")
-    # model.load_state_dict(checkpoint["net"])
+        if epoch >= 10:
+            exp_lr_scheduler.step()
 
+        print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
+
+        # g_writer.add_scalar(
+        #     "Loss train | Overall training",
+        #     total_loss,
+        #     epoch * (len(s_train_loader) + len(u_train_loader)) ,
+        # )
+
+        if epoch % args.save_freq == 0:
+            save_file = os.path.join(
+                './checkpoint/', 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
+            save_model(model, optimizer, args, epoch, save_file)
+
+
+    # save the last model
+    save_file = os.path.join(
+        './checkpoint/', 'last.pth')
+    save_model(model, optimizer, args, args.epochs, save_file)
 
 if __name__ == "__main__":
     main()

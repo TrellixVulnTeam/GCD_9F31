@@ -4,6 +4,8 @@ import os
 import os.path
 import numpy as np
 import sys
+
+from sklearn import datasets
 if sys.version_info[0] == 2:
     import cPickle as pickle
 else:
@@ -12,6 +14,7 @@ else:
 import random
 import torch
 import torch.utils.data as data
+from torch.utils.data.sampler import SubsetRandomSampler
 from .utils import download_url, check_integrity
 from .utils import TransformTwice, TransformKtimes, RandomTranslateWithReflect, TwoStreamBatchSampler
 import torchvision.transforms as transforms
@@ -101,6 +104,7 @@ class CIFAR10(data.Dataset):
         self.data = self.data[ind]
         self.targets = np.array(self.targets)
         self.targets = self.targets[ind].tolist()
+        self.train = (split == 'train')
 
 
 
@@ -293,3 +297,60 @@ def CIFAR100LoaderMix(root, batch_size, split='train',num_workers=2, aug=None, s
     dataset_labeled.data = np.concatenate((dataset_labeled.data,dataset_unlabeled.data),0)
     loader = data.DataLoader(dataset_labeled, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     return loader
+
+def CIFAR10SampledSetLoader(root, batch_size, aug=None, num_workers=2, shuffle=True):
+    dataset = CIFAR10Data(root, split='train', aug=aug, target_list=range(0, 10))
+    
+    num_train = len(dataset)
+    indices = list(range(num_train))
+    labeled_split = int(np.floor(0.25 * num_train))
+    labeled_indices = list(range(labeled_split))
+    valid_split = int(np.floor(0.1 * labeled_split))
+
+    if shuffle:
+        np.random.shuffle(indices)
+
+    train_idx, valid_idx, test_idx = labeled_indices[valid_split:], labeled_indices[:valid_split], indices[labeled_split:]
+
+    train_sampler = SubsetRandomSampler(train_idx)
+    valid_sampler = SubsetRandomSampler(valid_idx)
+    test_sampler = SubsetRandomSampler(test_idx)
+
+    train_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers)
+    valid_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=valid_sampler, num_workers=num_workers)
+    test_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=test_sampler, num_workers=num_workers)
+
+    return train_loader, valid_loader, test_loader
+
+
+def CIFAR100SampledSetLoader(root, batch_size, aug=None, num_workers=2, shuffle=True):
+    dataset = CIFAR100Data(root, split='train', aug=aug, target_list=range(0, 100))
+    
+    num_train = len(dataset)
+    indices = list(range(num_train))
+    labeled_split = int(np.floor(0.25 * num_train))
+    labeled_indices = list(range(labeled_split))
+    valid_split = int(np.floor(0.1 * labeled_split))
+
+    if shuffle:
+        np.random.shuffle(indices)
+
+    train_idx, valid_idx, test_idx = labeled_indices[valid_split:], labeled_indices[:valid_split], indices[labeled_split:]
+
+    train_sampler = SubsetRandomSampler(train_idx)
+    valid_sampler = SubsetRandomSampler(valid_idx)
+    test_sampler = SubsetRandomSampler(test_idx)
+
+    train_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers)
+    valid_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=valid_sampler, num_workers=num_workers)
+    test_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=test_sampler, num_workers=num_workers)
+
+    return train_loader, valid_loader, test_loader
+    
+
+
+
+
+
+
+    
