@@ -8,6 +8,7 @@ import numpy as np
 import itertools    
 import torch
 from torch.utils.data.sampler import Sampler
+from torch.utils.data import Dataset
 
 class TransformKtimes:
     def __init__(self, transform, k=10):

@@ -14,10 +14,10 @@ else:
 import random
 import torch
 import torch.utils.data as data
-from torch.utils.data.sampler import SubsetRandomSampler
 from .utils import download_url, check_integrity
 from .utils import TransformTwice, TransformKtimes, RandomTranslateWithReflect, TwoStreamBatchSampler
 import torchvision.transforms as transforms
+from torch.utils.data import Subset, ConcatDataset
 
 class CIFAR10(data.Dataset):
     """`CIFAR10 <https://www.cs.toronto.edu/~kriz/cifar.html>`_ Dataset.
@@ -182,7 +182,6 @@ class CIFAR10(data.Dataset):
         fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
         return fmt_str
 
-
 class CIFAR100(CIFAR10):
     """`CIFAR100 <https://www.cs.toronto.edu/~kriz/cifar.html>`_ Dataset.
     This is a subclass of the `CIFAR10` Dataset.
@@ -298,54 +297,91 @@ def CIFAR100LoaderMix(root, batch_size, split='train',num_workers=2, aug=None, s
     loader = data.DataLoader(dataset_labeled, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     return loader
 
+def CIFAR10DataNoLabel(root, split='train', aug=None, target_list=range(5)):
+    if aug==None:
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+    elif aug=='once':
+        transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+    elif aug=='twice':
+        transform = TransformTwice(transforms.Compose([
+            RandomTranslateWithReflect(4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ]))
+    dataset = CIFAR10NoLabel(root=root, split=split, transform=transform, target_list=target_list)
+    return dataset
+
 def CIFAR10SampledSetLoader(root, batch_size, aug=None, num_workers=2, shuffle=True):
-    dataset = CIFAR10Data(root, split='train', aug=aug, target_list=range(0, 10))
+
+    dataset = CIFAR10Data(root=root, split='train', aug=aug, target_list=range(0, 10))
+    dataset_no_label = CIFAR10DataNoLabel(root=root, split='train', aug=aug, target_list=range(0, 10))
+
+    #sub sampling
+    sample = list(range(10))
+    random.shuffle(sample)
+
+    sampled_labeled_indices = []
+    sampled_unlabeled_indices = []
+    for i in range(len(dataset)):
+        if dataset[i][1] in sample[5:]:
+            sampled_labeled_indices.append(i)
+        else:
+            sampled_unlabeled_indices.append(i)
+
+    labeled_indices = sampled_labeled_indices[:int(0.5 * len(sampled_labeled_indices))]
+    unlabeled_indices = sampled_labeled_indices[int(0.5 * len(sampled_labeled_indices)):]
+    validation_indices = labeled_indices[:int(0.1 * len(sampled_labeled_indices))]
+    labeled_indices = labeled_indices[int(0.1 * len(labeled_indices)):]
     
-    num_train = len(dataset)
-    indices = list(range(num_train))
-    labeled_split = int(np.floor(0.25 * num_train))
-    labeled_indices = list(range(labeled_split))
-    valid_split = int(np.floor(0.1 * labeled_split))
+    labeled_dataset = Subset(dataset, labeled_indices)
+    unlabeled_dataset = Subset(dataset, unlabeled_indices + sampled_unlabeled_indices)
+    validation_dataset = Subset(dataset, validation_indices)
 
-    if shuffle:
-        np.random.shuffle(indices)
+    labeled_loader = data.DataLoader(labeled_dataset, batch_size=batch_size, num_workers=num_workers)
+    val_loader = data.DataLoader(validation_dataset, batch_size=batch_size, num_workers=num_workers)
+    unlabeled_loader  = data.DataLoader(unlabeled_dataset, batch_size=batch_size, num_workers=num_workers)
 
-    train_idx, valid_idx, test_idx = labeled_indices[valid_split:], labeled_indices[:valid_split], indices[labeled_split:]
-
-    train_sampler = SubsetRandomSampler(train_idx)
-    valid_sampler = SubsetRandomSampler(valid_idx)
-    test_sampler = SubsetRandomSampler(test_idx)
-
-    train_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers)
-    valid_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=valid_sampler, num_workers=num_workers)
-    test_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=test_sampler, num_workers=num_workers)
-
-    return train_loader, valid_loader, test_loader
-
+    return labeled_loader, val_loader, unlabeled_loader
 
 def CIFAR100SampledSetLoader(root, batch_size, aug=None, num_workers=2, shuffle=True):
-    dataset = CIFAR100Data(root, split='train', aug=aug, target_list=range(0, 100))
+
+    dataset = CIFAR10Data(root=root, split='train', aug=aug, target_list=range(0, 100))
+
+    #sub sampling
+    sample = list(range(10))
+    random.shuffle(sample)
+
+    sampled_labeled_indices = []
+    sampled_unlabeled_indices = []
+    for i in range(len(dataset)):
+        if dataset[i][1] in sample[80:]:
+            sampled_labeled_indices.append(i)
+        else:
+            sampled_unlabeled_indices.append(i)
+
+    labeled_indices = sampled_labeled_indices[:int(0.5 * len(sampled_labeled_indices))]
+    unlabeled_indices = sampled_labeled_indices[int(0.5 * len(sampled_labeled_indices)):]
+    validation_indices = labeled_indices[:int(0.1 * len(sampled_labeled_indices))]
+    labeled_indices = labeled_indices[int(0.1 * len(labeled_indices)):]
     
-    num_train = len(dataset)
-    indices = list(range(num_train))
-    labeled_split = int(np.floor(0.25 * num_train))
-    labeled_indices = list(range(labeled_split))
-    valid_split = int(np.floor(0.1 * labeled_split))
+    labeled_dataset = Subset(dataset, labeled_indices)
+    unlabeled_dataset = Subset(dataset, unlabeled_indices + sampled_unlabeled_indices)
+    validation_dataset = Subset(dataset, validation_indices)
 
-    if shuffle:
-        np.random.shuffle(indices)
+    labeled_loader = data.DataLoader(labeled_dataset, batch_size=batch_size, num_workers=num_workers)
+    val_loader = data.DataLoader(validation_dataset, batch_size=batch_size, num_workers=num_workers)
+    unlabeled_loader  = data.DataLoader(unlabeled_dataset, batch_size=batch_size, num_workers=num_workers)
 
-    train_idx, valid_idx, test_idx = labeled_indices[valid_split:], labeled_indices[:valid_split], indices[labeled_split:]
-
-    train_sampler = SubsetRandomSampler(train_idx)
-    valid_sampler = SubsetRandomSampler(valid_idx)
-    test_sampler = SubsetRandomSampler(test_idx)
-
-    train_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers)
-    valid_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=valid_sampler, num_workers=num_workers)
-    test_loader = data.DataLoader(dataset, batch_size=batch_size, sampler=test_sampler, num_workers=num_workers)
-
-    return train_loader, valid_loader, test_loader
+    return labeled_loader, val_loader, unlabeled_loader
     
 
 
