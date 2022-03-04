@@ -19,6 +19,7 @@ from .utils import TransformTwice, TransformKtimes, RandomTranslateWithReflect, 
 import torchvision.transforms as transforms
 from torch.utils.data import Subset, ConcatDataset
 
+
 class CIFAR10(data.Dataset):
     """`CIFAR10 <https://www.cs.toronto.edu/~kriz/cifar.html>`_ Dataset.
     Args:
@@ -219,7 +220,7 @@ def CIFAR10Data(root, split='train', aug=None, target_list=range(5)):
         ])
     elif aug=='twice':
         transform = TransformTwice(transforms.Compose([
-            RandomTranslateWithReflect(4),
+            transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
@@ -297,53 +298,39 @@ def CIFAR100LoaderMix(root, batch_size, split='train',num_workers=2, aug=None, s
     loader = data.DataLoader(dataset_labeled, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     return loader
 
-def CIFAR10DataNoLabel(root, split='train', aug=None, target_list=range(5)):
-    if aug==None:
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ])
-    elif aug=='once':
-        transform = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ])
-    elif aug=='twice':
-        transform = TransformTwice(transforms.Compose([
-            RandomTranslateWithReflect(4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ]))
-    dataset = CIFAR10NoLabel(root=root, split=split, transform=transform, target_list=target_list)
-    return dataset
-
 def CIFAR10SampledSetLoader(root, batch_size, aug=None, num_workers=2, shuffle=True):
 
     dataset = CIFAR10Data(root=root, split='train', aug=aug, target_list=range(0, 10))
-    dataset_no_label = CIFAR10DataNoLabel(root=root, split='train', aug=aug, target_list=range(0, 10))
 
     #sub sampling
     sample = list(range(10))
     random.shuffle(sample)
 
+    y = np.array(dataset.targets)
+
     sampled_labeled_indices = []
     sampled_unlabeled_indices = []
-    for i in range(len(dataset)):
-        if dataset[i][1] in sample[5:]:
-            sampled_labeled_indices.append(i)
-        else:
-            sampled_unlabeled_indices.append(i)
+    # Locate position of labels that equal to i
+    for i in sample[5:]:
+        pos_i = np.argwhere(y == i)
+        labeled = pos_i[:int(0.5 * len(pos_i))]
+        unlabeled = pos_i[int(0.5 * len(pos_i)):]
+        #1d array
+        l_arr = list(labeled[:, 0])
+        u_arr = list(unlabeled[:, 0])
+        sampled_labeled_indices.extend(l_arr)
+        sampled_unlabeled_indices.extend(u_arr)
 
-    labeled_indices = sampled_labeled_indices[:int(0.5 * len(sampled_labeled_indices))]
-    unlabeled_indices = sampled_labeled_indices[int(0.5 * len(sampled_labeled_indices)):]
-    validation_indices = labeled_indices[:int(0.1 * len(sampled_labeled_indices))]
-    labeled_indices = labeled_indices[int(0.1 * len(labeled_indices)):]
-    
-    labeled_dataset = Subset(dataset, labeled_indices)
-    unlabeled_dataset = Subset(dataset, unlabeled_indices + sampled_unlabeled_indices)
+    validation_indices = sampled_labeled_indices[:int(0.1 * len(sampled_labeled_indices))]
+    sampled_labeled_indices = sampled_labeled_indices[int(0.1 * len(sampled_labeled_indices)):]
+
+    for i in sample[:5]:
+        unlabeled = np.argwhere(y == i)
+        u_arr = list(unlabeled[:, 0])
+        sampled_unlabeled_indices.extend(u_arr)
+
+    labeled_dataset = Subset(dataset, sampled_labeled_indices)
+    unlabeled_dataset = Subset(dataset, sampled_unlabeled_indices)
     validation_dataset = Subset(dataset, validation_indices)
 
     labeled_loader = data.DataLoader(labeled_dataset, batch_size=batch_size, num_workers=num_workers)
@@ -356,25 +343,35 @@ def CIFAR100SampledSetLoader(root, batch_size, aug=None, num_workers=2, shuffle=
 
     dataset = CIFAR10Data(root=root, split='train', aug=aug, target_list=range(0, 100))
 
-    #sub sampling
-    sample = list(range(10))
+   #sub sampling
+    sample = list(range(100))
     random.shuffle(sample)
+
+    y = np.array(dataset.targets)
 
     sampled_labeled_indices = []
     sampled_unlabeled_indices = []
-    for i in range(len(dataset)):
-        if dataset[i][1] in sample[80:]:
-            sampled_labeled_indices.append(i)
-        else:
-            sampled_unlabeled_indices.append(i)
+    # Locate position of labels that equal to i
+    for i in sample[80:]:
+        pos_i = np.argwhere(y == i)
+        labeled = pos_i[:int(0.5 * len(pos_i))]
+        unlabeled = pos_i[int(0.5 * len(pos_i)):]
+        #1d array
+        l_arr = list(labeled[:, 0])
+        u_arr = list(unlabeled[:, 0])
+        sampled_labeled_indices.extend(l_arr)
+        sampled_unlabeled_indices.extend(u_arr)
 
-    labeled_indices = sampled_labeled_indices[:int(0.5 * len(sampled_labeled_indices))]
-    unlabeled_indices = sampled_labeled_indices[int(0.5 * len(sampled_labeled_indices)):]
-    validation_indices = labeled_indices[:int(0.1 * len(sampled_labeled_indices))]
-    labeled_indices = labeled_indices[int(0.1 * len(labeled_indices)):]
-    
-    labeled_dataset = Subset(dataset, labeled_indices)
-    unlabeled_dataset = Subset(dataset, unlabeled_indices + sampled_unlabeled_indices)
+    validation_indices = sampled_labeled_indices[:int(0.1 * len(sampled_labeled_indices))]
+    sampled_labeled_indices = sampled_labeled_indices[int(0.1 * len(sampled_labeled_indices)):]
+
+    for i in sample[:80]:
+        unlabeled = np.argwhere(y == i)
+        u_arr = list(unlabeled[:, 0])
+        sampled_unlabeled_indices.extend(u_arr)
+
+    labeled_dataset = Subset(dataset, sampled_labeled_indices)
+    unlabeled_dataset = Subset(dataset, sampled_unlabeled_indices)
     validation_dataset = Subset(dataset, validation_indices)
 
     labeled_loader = data.DataLoader(labeled_dataset, batch_size=batch_size, num_workers=num_workers)
@@ -382,10 +379,129 @@ def CIFAR100SampledSetLoader(root, batch_size, aug=None, num_workers=2, shuffle=
     unlabeled_loader  = data.DataLoader(unlabeled_dataset, batch_size=batch_size, num_workers=num_workers)
 
     return labeled_loader, val_loader, unlabeled_loader
-    
 
+def CIFAR10SampledSetLoaderNoAugmentation(root, batch_size, aug=None, num_workers=2, shuffle=True):
 
+    dataset = CIFAR10Data(root=root, split='test', aug=aug, target_list=range(5, 10))
 
+   #sub sampling
+    sample = list(range(10))
+    random.shuffle(sample)
+
+    y = np.array(dataset.targets)
+
+    sampled_labeled_indices = []
+    sampled_unlabeled_indices = []
+    # Locate position of labels that equal to i
+    for i in sample[5:]:
+        pos_i = np.argwhere(y == i)
+        labeled = pos_i[:int(0.5 * len(pos_i))]
+        unlabeled = pos_i[int(0.5 * len(pos_i)):]
+        #1d array
+        l_arr = list(labeled[:, 0])
+        u_arr = list(unlabeled[:, 0])
+        sampled_labeled_indices.extend(l_arr)
+        sampled_unlabeled_indices.extend(u_arr)
+
+    for i in sample[:5]:
+        unlabeled = np.argwhere(y == i)
+        u_arr = list(unlabeled[:, 0])
+        sampled_unlabeled_indices.extend(u_arr)
+
+    labeled_dataset = Subset(dataset, sampled_labeled_indices)
+    unlabeled_dataset = Subset(dataset, sampled_unlabeled_indices)
+
+    combined_ds = ConcatDataset([labeled_dataset, unlabeled_dataset])
+
+    labeled_loader = data.DataLoader(labeled_dataset, batch_size=batch_size, num_workers=num_workers)
+    unlabeled_loader = data.DataLoader(unlabeled_dataset, batch_size=batch_size, num_workers=num_workers)
+    all_loader = data.DataLoader(combined_ds, batch_size=batch_size, num_workers=num_workers)
+
+    return labeled_loader, unlabeled_loader, all_loader
+
+def CIFAR10SampledSetLoaderMix(root, batch_size, aug=None, num_workers=2, shuffle=True):
+
+    dataset = CIFAR10Data(root=root, split='train', aug=aug, target_list=range(0, 10))
+
+    #sub sampling
+    sample = list(range(10))
+    random.shuffle(sample)
+
+    y = np.array(dataset.targets)
+
+    sampled_labeled_indices = []
+    sampled_unlabeled_indices = []
+    # Locate position of labels that equal to i
+    for i in sample[5:]:
+        pos_i = np.argwhere(y == i)
+        labeled = pos_i[:int(0.5 * len(pos_i))]
+        unlabeled = pos_i[int(0.5 * len(pos_i)):]
+        #1d array
+        l_arr = list(labeled[:, 0])
+        u_arr = list(unlabeled[:, 0])
+        sampled_labeled_indices.extend(l_arr)
+        sampled_unlabeled_indices.extend(u_arr)
+
+    validation_indices = sampled_labeled_indices[:int(0.1 * len(sampled_labeled_indices))]
+    sampled_labeled_indices = sampled_labeled_indices[int(0.1 * len(sampled_labeled_indices)):]
+
+    for i in sample[:5]:
+        unlabeled = np.argwhere(y == i)
+        u_arr = list(unlabeled[:, 0])
+        sampled_unlabeled_indices.extend(u_arr)
+
+    labeled_dataset = Subset(dataset, sampled_labeled_indices)
+    unlabeled_dataset = Subset(dataset, sampled_unlabeled_indices)
+    validation_dataset = Subset(dataset, validation_indices)
+
+    combined_ds = ConcatDataset([labeled_dataset, unlabeled_dataset])
+
+    train_loader = data.DataLoader(combined_ds, batch_size=batch_size, num_workers=num_workers)
+    val_loader = data.DataLoader(validation_dataset, batch_size=batch_size, num_workers=num_workers)
+
+    return train_loader, val_loader
+
+def CIFAR100SampledSetLoaderMix(root, batch_size, aug=None, num_workers=2, shuffle=True):
+
+    dataset = CIFAR10Data(root=root, split='train', aug=aug, target_list=range(0, 100))
+
+    #sub sampling
+    sample = list(range(100))
+    random.shuffle(sample)
+
+    y = np.array(dataset.targets)
+
+    sampled_labeled_indices = []
+    sampled_unlabeled_indices = []
+    # Locate position of labels that equal to i
+    for i in sample[80:]:
+        pos_i = np.argwhere(y == i)
+        labeled = pos_i[:int(0.5 * len(pos_i))]
+        unlabeled = pos_i[int(0.5 * len(pos_i)):]
+        #1d array
+        l_arr = list(labeled[:, 0])
+        u_arr = list(unlabeled[:, 0])
+        sampled_labeled_indices.extend(l_arr)
+        sampled_unlabeled_indices.extend(u_arr)
+
+    validation_indices = sampled_labeled_indices[:int(0.1 * len(sampled_labeled_indices))]
+    sampled_labeled_indices = sampled_labeled_indices[int(0.1 * len(sampled_labeled_indices)):]
+
+    for i in sample[:80]:
+        unlabeled = np.argwhere(y == i)
+        u_arr = list(unlabeled[:, 0])
+        sampled_unlabeled_indices.extend(u_arr)
+
+    labeled_dataset = Subset(dataset, sampled_labeled_indices)
+    unlabeled_dataset = Subset(dataset, sampled_unlabeled_indices)
+    validation_dataset = Subset(dataset, validation_indices)
+
+    combined_ds = ConcatDataset([labeled_dataset, unlabeled_dataset])
+
+    train_loader = data.DataLoader(combined_ds, batch_size=batch_size, num_workers=num_workers)
+    val_loader = data.DataLoader(validation_dataset, batch_size=batch_size, num_workers=num_workers)
+
+    return train_loader, val_loader
 
 
 

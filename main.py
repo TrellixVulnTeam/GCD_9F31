@@ -11,9 +11,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils import save_model, accuracy
 from utils import AverageMeter
-from loss.spc import SupervisedContrastiveLoss
-from loss.sspc import SelfSupervisedContrastiveLoss
-from data.cifarloader import CIFAR100SampledSetLoader, CIFAR10SampledSetLoader, CIFAR100Loader, CIFAR10Loader
+from loss.spc import ContrastiveLoss
+from loss.NTXent import NTXent
+from data.cifarloader import CIFAR100SampledSetLoaderMix, CIFAR10SampledSetLoaderMix
 import vision_transformer as vits
 from vision_transformer import DINOHead
 from tqdm import tqdm
@@ -55,50 +55,38 @@ def get_model(pretrained=True, **kwargs):
         )
         model.load_state_dict(state_dict, strict=True)
 
-    for param in model.parameters():
-        param.requires_grad = False
-    model.norm.bias.requires_grad = True
-    model.norm.weight.requires_grad = True
-    for name, param in model.named_parameters():
-        if name.startswith('blocks.11'):
-            param.requires_grad = True
-    
     return model
 
-def train(model, train_loader, u_criterion, s_criterion, optimizer, writer, epoch, args):
+def train(model, train_loader, criterion, optimizer, writer, epoch, args):
     model.train()
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
 
-    accuracy_list = list()
-
     end = time.time()
     
-    for batch_idx, (images, labels, idx, labeled) in enumerate(tqdm(train_loader)):
+    for batch_idx, (images, labels, idx) in enumerate(tqdm(train_loader)):
         data_time.update(time.time() - end)
 
         images = torch.cat([images[0], images[1]], dim=0)
         images, labels = images.to(args.device), labels.to(args.device)
         bsz = labels.shape[0]
         # compute loss
+        optimizer.zero_grad()
+
         features = model.head.forward(model(images))
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         output = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-        u_loss = u_criterion(output)
-        if labeled.numpy()[0]:
-            s_loss = s_criterion(output, labels)
-        else:
-            s_loss = s_criterion(output, None)
+        u_loss = criterion(output)
+        s_loss = criterion(output, labels)
 
-        loss = ((1 - args.weight_coeff) * u_loss) +  (args.weight_coeff * s_loss)
+        loss = ((1 - args.weight_coeff) * u_loss) + (args.weight_coeff * s_loss)
 
         # update metric
         losses.update(loss.item(), bsz)
 
         # SGD
-        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
@@ -106,12 +94,6 @@ def train(model, train_loader, u_criterion, s_criterion, optimizer, writer, epoc
         batch_time.update(time.time() - end)
 
         end = time.time()
-
-        writer.add_scalar(
-            "Loss train | Unsupervised Contrastive",
-            loss.item(),
-            epoch * len(train_loader) + batch_idx,
-        )
     
         # print info
         if (batch_idx + 1) % args.print_freq == 0:
@@ -126,19 +108,53 @@ def train(model, train_loader, u_criterion, s_criterion, optimizer, writer, epoc
     
     return losses.avg
 
-# def test(model, dataloader, writer, epoch, args):
-#     acc_record = AverageMeter()
-#     model.eval()
-#     for batch_idx, (data, label, idx) in enumerate(tqdm(dataloader)):
-#         data, label = data.to(args.device), label.to(args.device)
-#         output = model.head.forward(model(data))
-#         # measure accuracy and record loss
-#         acc = accuracy(output, label)
-#         acc_record.update(acc[0].item(), data.size(0))
-        
+@torch.no_grad()
+def validate_network(model, dataloader, criterion, args):
+    acc_1_m = AverageMeter()
+    acc_5_m = AverageMeter()
+    losses = AverageMeter()
+    model.eval()
+    for batch_idx, (images, labels, idx) in enumerate(tqdm(dataloader)):
+        images = torch.cat([images[0], images[1]], dim=0)
+        images, labels = images.to(args.device), labels.to(args.device)
+        bsz = labels.shape[0]
+        features = model.head.forward(model(images))
+        f1, f2 = torch.split(features, [bsz, bsz], dim=0)
+        output = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
+        u_loss = criterion(output)
+        s_loss = criterion(output, labels)
 
-#     print('Test Acc: {:.4f}'.format(acc_record.avg))
-#     return acc_record 
+        loss = ((1 - args.weight_coeff) * u_loss) + (args.weight_coeff * s_loss)
+
+        # update metric
+        losses.update(loss.item(), bsz)
+
+        labels = torch.cat([labels, labels], dim=0)
+
+        acc1, acc5 = accuracy(features, labels, topk=(1, 5))
+
+        acc_1_m.update(acc1.item(), bsz)
+        acc_5_m.update(acc5.item(), bsz)
+
+    return acc_1_m.avg, acc_5_m.avg, losses.avg
+
+def validate(model, valid_loader, args):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for batch_idx, (images, labels, idx) in enumerate(tqdm(valid_loader)):
+            x, labels = images[1].to(args.device), labels.to(args.device)
+            output = model.head.forward(model(x))
+            _, predicted = output.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+
+    # Save checkpoint.
+    acc = 100.0 * correct / total
+    if acc > args.best_acc:
+        args.best_acc = acc
+
 
 def main():
     args = parse_args()
@@ -149,14 +165,14 @@ def main():
 
     # build data loader unsupervised
     if args.dataset == "cifar100":
-        s_labeled_loader, s_valid_loader, s_unlabeled_loader, mixed_loader = CIFAR100SampledSetLoader(root=args.dataset_root, 
+        train_loader, val_loader = CIFAR100SampledSetLoaderMix(root=args.dataset_root, 
                                                                                         batch_size=args.batch_size, 
                                                                                         aug='twice', 
                                                                                         num_workers=args.num_workers,
                                                                                         shuffle=True)
         num_classes =  args.num_labeled_classes + args.num_unlabeled_classes
     else:
-        s_labeled_loader, s_valid_loader, s_unlabeled_loader, mixed_loader = CIFAR10SampledSetLoader(root=args.dataset_root, 
+        train_loader, val_loader = CIFAR10SampledSetLoaderMix(root=args.dataset_root, 
                                                                                         batch_size=args.batch_size, 
                                                                                         aug='twice', 
                                                                                         num_workers=args.num_workers,
@@ -165,9 +181,25 @@ def main():
 
     # load dino model
     model = get_model()
+    
+    cudnn.benchmark = True
+    for param in model.parameters():
+        param.requires_grad = False
+    for name, param in model.named_parameters():
+        if name.startswith('blocks.11'):
+            param.requires_grad = True
     model.head = DINOHead(in_dim=model.num_features, out_dim=num_classes)
     model = model.to(device)
-    cudnn.benchmark = True
+
+    # for p in filter(lambda p: p.requires_grad, model.parameters()):
+    #     print(p.requires_grad)
+
+    # for name, child in model.named_children():
+    #     print("--" + name + "--")
+    #     for na, child in child.named_children():
+    #         for param in child.parameters():
+    #             print("{} {} ".format(na, param.requires_grad))
+
 
     if not os.path.isdir(args.boardlogs):
         os.makedirs(args.boardlogs)
@@ -178,46 +210,51 @@ def main():
     writer = SummaryWriter(args.boardlogs)
     
     optimizer = optim.SGD(
-        model.parameters(),
+        filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
         momentum=args.momentum,
         weight_decay=args.weight_decay,
     )
     
     args.best_acc = 0.0
-    u_criterion = SelfSupervisedContrastiveLoss(temperature=args.temperature)
-    u_criterion.to(args.device)
-    s_criterion = SupervisedContrastiveLoss(temperature=args.temperature)
-    s_criterion.to(args.device)
+    criterion = ContrastiveLoss(temperature=args.temperature)
+    criterion.to(args.device)
+  
+    #decay schedule
+    exp_lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0, last_epoch=-1)
 
     #train
     for epoch in range(1, args.epochs + 1):
-        #decay schedule
-        exp_lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0, last_epoch=-1)
-
         time1 = time.time()
-        loss = train(model, mixed_loader, u_criterion, s_criterion, optimizer, writer, epoch, args)
-        # acc = test(model, valid_loader, writer, epoch, args)
+        loss = train(model, train_loader, criterion, optimizer, writer, epoch, args)
+        acc1, acc5, ev_loss = validate_network(model, val_loader, criterion, args)
+        # validate(model, val_loader, args)
         time2 = time.time()
 
         exp_lr_scheduler.step()
 
         print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
-        writer.add_scalar("Model Loss | Overall training", loss, epoch)
+        writer.add_scalar("Model Loss | Epoch", loss, epoch)
 
-        # writer.add_scalar("Accuracy validation", acc.avg, epoch)
+        writer.add_scalar("Evaluation Loss | Epoch", ev_loss, epoch)
+
+        # writer.add_scalar("Accuracy | Epoch", args.best_acc, epoch)
+
+        writer.add_scalar("Accuracy Top 5 | Epoch", acc5, epoch)
+
+        writer.add_scalar("Accuracy Top 1 | Epoch", acc1, epoch)
 
         if epoch % args.save_freq == 0:
             save_file = os.path.join(
-                args.checkpoint, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
+                args.checkpoint, 'ckpt_epoch_{epoch}_{dataset}.pth'.format(epoch=epoch, dataset=args.dataset))
             save_model(model, optimizer, args, epoch, save_file)
 
     writer.flush()
     writer.close()
     # save the last model
     save_file = os.path.join(
-        args.checkpoint, 'last.pth')
+        args.checkpoint, '{dataset}_last.pth'.format(dataset=args.dataset))
     save_model(model, optimizer, args, args.epochs, save_file)
    
 if __name__ == "__main__":

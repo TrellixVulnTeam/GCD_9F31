@@ -3,15 +3,16 @@ from __future__ import print_function
 import torch
 import torch.nn as nn
 
-class SupervisedContrastiveLoss(nn.Module):
+class ContrastiveLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
     It also supports the unsupervised contrastive loss in SimCLR"""
     def __init__(self, temperature=0.07, contrast_mode='all',
-                 base_temperature=0.07):
-        super(SupervisedContrastiveLoss, self).__init__()
+                 base_temperature=0.07, device="cuda"):
+        super(ContrastiveLoss, self).__init__()
         self.temperature = temperature
         self.contrast_mode = contrast_mode
         self.base_temperature = base_temperature
+        self.device = device
 
     def forward(self, features, labels=None, mask=None):
         """Compute loss for model. If both `labels` and `mask` are None,

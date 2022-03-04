@@ -7,8 +7,9 @@ import sys
 import time
 import math
 import numpy as np
-import vision_transformer as vits
 import torch
+import datetime
+import torch.distributed as dist
 
 _, term_width = shutil.get_terminal_size()
 term_width = int(term_width)
@@ -162,38 +163,30 @@ def save_model(model, optimizer, opt, epoch, save_file):
     torch.save(state, save_file)
     del state
 
+# def accuracy(output, target, topk=(1,)):
+#     """Computes the accuracy over the k top predictions for the specified values of k"""
+#     with torch.no_grad():
+#         maxk = max(topk)
+#         batch_size = target.size(0)
+
+#         _, pred = output.topk(maxk, 1, True, True)
+#         pred = pred.t()
+#         correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+#         res = []
+#         for k in topk:
+#             correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+#             res.append(correct_k.mul_(100.0 / batch_size))
+    
+#     return res
+
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
-    with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
+    maxk = max(topk)
+    batch_size = output.size(0)
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.reshape(1, -1).expand_as(pred))
 
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
+    return [correct[:k].reshape(-1).float().sum(0) * 100. / batch_size for k in topk]
 
-        res = []
-        for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-    
-    return res
-
-def get_model(pretrained=True, **kwargs):
-    model = vits.__dict__["vit_base"](patch_size=16, num_classes=0, **kwargs)
-    if pretrained:
-        state_dict = torch.hub.load_state_dict_from_url(
-            url="https://dl.fbaipublicfiles.com/dino/dino_vitbase16_pretrain/dino_vitbase16_pretrain.pth",
-            map_location="cpu",
-        )
-        model.load_state_dict(state_dict, strict=True)
-
-    for param in model.parameters():
-        param.requires_grad = False
-    model.norm.bias.requires_grad = True
-    model.norm.weight.requires_grad = True
-    for name, param in model.named_parameters():
-        if name.startswith('blocks.11'):
-            param.requires_grad = True
-    
-    return model
